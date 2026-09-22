@@ -200,6 +200,7 @@ def run_cross(all_paths, samples, args, global_le, nc):
 
 
 def main():
+    global HF_REPO
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, default="single", choices=["single", "cross"],
                         help="single=每个样本内部划分, cross=留一法交叉验证")
@@ -220,7 +221,6 @@ def main():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    global HF_REPO
     HF_REPO = args.repo_id
 
     torch.manual_seed(args.seed)
