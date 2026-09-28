@@ -33,6 +33,8 @@ def cluster_and_eval(embeddings, labels_str):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--emb_path", type=str, default=None)
+    parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--data_dir", type=str, default="work/test5/stofm_input")
     parser.add_argument("--samples", type=str, default="1_0,4_0")
     parser.add_argument("--label_key", type=str, default="cell_type")
@@ -40,6 +42,17 @@ def main():
     args = parser.parse_args()
 
     np.random.seed(args.seed)
+
+    # 直接指定路径模式
+    if args.emb_path and args.data_path:
+        print(f"零样本聚类 | 标签: {args.label_key}")
+        print(f"\n[direct]")
+        emb, labs = load_data(args.emb_path, args.data_path, args.label_key)
+        ari, nmi, homo = cluster_and_eval(emb, labs)
+        print(f"  ARI: {ari:.4f}, NMI: {nmi:.4f}, Homo: {homo:.4f}")
+        return
+
+    # 原有 data_dir + samples 模式
     samples = [s.strip() for s in args.samples.split(",")]
 
     print(f"零样本聚类 | 标签: {args.label_key}")

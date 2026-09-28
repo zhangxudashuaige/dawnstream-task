@@ -1,6 +1,9 @@
 """Gene expression imputation: single MLP -> multiple target genes.
 Train on section_1 (all cells), test on section_2.
-Uses pre-computed stofm_emb.npy from stofm_input/.
+
+支持两种模式:
+  1) --emb_s1 --data_s1 --emb_s2 --data_s2  直接指定四个路径
+  2) --data_dir (默认 stofm_input 结构)
 """
 from __future__ import annotations
 
@@ -14,9 +17,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 
-def load_section(data_dir, section):
-    emb = np.load(f"{data_dir}/{section}/stofm_emb.npy").astype(np.float32)
-    a = ad.read_h5ad(f"{data_dir}/{section}/data.h5ad")
+def load_section(emb_path, data_path):
+    emb = np.load(emb_path).astype(np.float32)
+    a = ad.read_h5ad(data_path)
     expr = a.X.toarray() if hasattr(a.X, "toarray") else np.asarray(a.X)
     return emb, expr.astype(np.float32), list(a.var_names)
 
@@ -42,7 +45,7 @@ def compute_metrics(target, prediction):
         "mae": float(np.mean(np.abs(error))),
     }, by_gene
 
-def train_one_seed(args, data_dir, seed):
+def train_one_seed(args, emb_tr_path, data_tr_path, emb_te_path, data_te_path, seed):
     import torch
     from torch import nn
     from torch.utils.data import DataLoader, TensorDataset
@@ -52,13 +55,11 @@ def train_one_seed(args, data_dir, seed):
         torch.cuda.manual_seed_all(seed)
     device = torch.device(args.device)
 
-    # section_1 = 训练, section_2 = 测试
-    emb_tr, expr_tr, genes_tr = load_section(data_dir, "section_1")
-    emb_te, expr_te, genes_te = load_section(data_dir, "section_2")
+    emb_tr, expr_tr, genes_tr = load_section(emb_tr_path, data_tr_path)
+    emb_te, expr_te, genes_te = load_section(emb_te_path, data_te_path)
     assert genes_tr == genes_te, "Gene lists must match between sections"
     print(f"训练(s1): {emb_tr.shape[0]} | 测试(s2): {emb_te.shape[0]} | 基因: {len(genes_tr)}")
 
-    # 随机选目标基因
     rng = np.random.default_rng(seed)
     n_genes = min(args.n_genes, expr_tr.shape[1])
     target_idx = np.sort(rng.choice(expr_tr.shape[1], n_genes, replace=False))
@@ -67,13 +68,11 @@ def train_one_seed(args, data_dir, seed):
     Y_tr = expr_tr[:, target_idx]
     Y_te = expr_te[:, target_idx]
 
-    # Z-score（训练集统计量）
     mean, std = emb_tr.mean(axis=0), emb_tr.std(axis=0)
     std = np.maximum(std, 1e-6)
     X_tr = (emb_tr - mean) / std
     X_te = (emb_te - mean) / std
 
-    # 单 MLP → 所有目标基因
     net = nn.Sequential(
         nn.Linear(X_tr.shape[1], args.hidden[0]), nn.LeakyReLU(0.01),
         nn.Linear(args.hidden[0], args.hidden[1]), nn.LeakyReLU(0.01),
@@ -96,7 +95,6 @@ def train_one_seed(args, data_dir, seed):
                 chunks.append(net(chunk).cpu().numpy())
         return np.concatenate(chunks)
 
-    # 无 val split，跑满所有 epoch
     for epoch in range(1, args.epochs + 1):
         net.train()
         total = 0.0
@@ -109,12 +107,10 @@ def train_one_seed(args, data_dir, seed):
         if epoch % 20 == 0 or epoch == 1:
             print(f"  seed={seed} ep={epoch:3d} train_mse={total / len(X_tr):.6f}")
 
-    # 测试 section_2
     pred = predict(X_te)
     result, per_gene = compute_metrics(Y_te, pred)
     result.update(seed=seed, epochs=args.epochs, target_genes=n_genes)
 
-    # 保存
     out_dir = args.output / f"seed_{seed}"
     out_dir.mkdir(parents=True, exist_ok=True)
     target_names = [genes_tr[i] for i in target_idx]
@@ -127,7 +123,16 @@ def train_one_seed(args, data_dir, seed):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+
+    # 模式1: 直接指定四个路径
+    p.add_argument("--emb_s1", type=str, default=None)
+    p.add_argument("--data_s1", type=str, default=None)
+    p.add_argument("--emb_s2", type=str, default=None)
+    p.add_argument("--data_s2", type=str, default=None)
+
+    # 模式2: data_dir 模式
     p.add_argument("--data_dir", type=str, default="work/test7/stofm_input")
+
     p.add_argument("--output", type=Path, default=ROOT / "work/test7/imputation_runs")
     p.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
     p.add_argument("--n_genes", type=int, default=50)
@@ -140,12 +145,25 @@ def main():
     args = p.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    print(f"基因表达插补 | section_1→section_2 | 目标基因: {args.n_genes} | seeds: {args.seeds}")
+
+    # 判断用哪种模式
+    if args.emb_s1 and args.data_s1 and args.emb_s2 and args.data_s2:
+        emb_tr_path = args.emb_s1
+        data_tr_path = args.data_s1
+        emb_te_path = args.emb_s2
+        data_te_path = args.data_s2
+        print(f"基因表达插补 | 直接路径模式 | 目标基因: {args.n_genes} | seeds: {args.seeds}")
+    else:
+        emb_tr_path = f"{args.data_dir}/section_1/stofm_emb.npy"
+        data_tr_path = f"{args.data_dir}/section_1/data.h5ad"
+        emb_te_path = f"{args.data_dir}/section_2/stofm_emb.npy"
+        data_te_path = f"{args.data_dir}/section_2/data.h5ad"
+        print(f"基因表达插补 | data_dir模式 | 目标基因: {args.n_genes} | seeds: {args.seeds}")
 
     results = []
     for seed in args.seeds:
         print(f"\n{'='*50}\nSeed {seed}\n{'='*50}")
-        results.append(train_one_seed(args, args.data_dir, seed))
+        results.append(train_one_seed(args, emb_tr_path, data_tr_path, emb_te_path, data_te_path, seed))
 
     if results:
         df = pd.DataFrame(results)
